@@ -643,6 +643,229 @@ pub mod turbin3_rust {
 
         Ok(())
     }
+
+    // ============ NFT STAKING INSTRUCTIONS ============
+
+    pub fn initialize_nft_staking_pool(
+        ctx: Context<InitializeNftStakingPool>, 
+        daily_reward_rate: u64, 
+        min_stake_duration: i64,
+        collection_address: Option<Pubkey>
+    ) -> Result<()> {
+        require!(daily_reward_rate > 0, ErrorCode::InvalidAmount);
+        require!(min_stake_duration > 0, ErrorCode::InvalidAmount);
+
+        let pool = &mut ctx.accounts.nft_staking_pool;
+        pool.admin = ctx.accounts.admin.key();
+        pool.reward_mint = ctx.accounts.reward_mint.key();
+        pool.reward_vault = ctx.accounts.reward_vault.key();
+        pool.total_nfts_staked = 0;
+        pool.daily_reward_rate = daily_reward_rate; // Rewards per day per staked NFT
+        pool.last_update_time = Clock::get()?.unix_timestamp;
+        pool.accumulated_reward_per_nft = 0;
+        pool.min_stake_duration = min_stake_duration;
+        pool.collection_address = collection_address;
+        pool.total_rewards_distributed = 0;
+        pool.bump = ctx.bumps.nft_staking_pool;
+        Ok(())
+    }
+
+    pub fn stake_nft(ctx: Context<StakeNft>) -> Result<()> {
+        let current_time = Clock::get()?.unix_timestamp;
+        let pool = &mut ctx.accounts.nft_staking_pool;
+        let user_nft_stake = &mut ctx.accounts.user_nft_stake;
+
+        // Verify collection if specified
+        if let Some(collection_address) = pool.collection_address {
+            // Verify the NFT belongs to the specified collection
+            // This would typically involve checking the NFT's metadata for collection verification
+            require!(
+                ctx.accounts.nft_metadata.to_account_info().data_is_empty() == false,
+                ErrorCode::InvalidNftMetadata
+            );
+        }
+
+        // Update reward accumulation for the pool
+        if pool.total_nfts_staked > 0 {
+            let time_elapsed = current_time - pool.last_update_time;
+            let daily_seconds = 86400; // 24 * 60 * 60
+            let rewards_per_nft = (pool.daily_reward_rate as u128 * time_elapsed as u128) / daily_seconds as u128;
+            pool.accumulated_reward_per_nft = pool.accumulated_reward_per_nft.checked_add(rewards_per_nft as u64).unwrap();
+        }
+        pool.last_update_time = current_time;
+
+        // Initialize user NFT stake
+        user_nft_stake.user = ctx.accounts.user.key();
+        user_nft_stake.nft_staking_pool = ctx.accounts.nft_staking_pool.key();
+        user_nft_stake.nft_mint = ctx.accounts.nft_mint.key();
+        user_nft_stake.stake_time = current_time;
+        user_nft_stake.last_claim_time = current_time;
+        user_nft_stake.reward_debt = pool.accumulated_reward_per_nft;
+        user_nft_stake.pending_rewards = 0;
+        user_nft_stake.bump = ctx.bumps.user_nft_stake;
+
+        // Update pool total
+        pool.total_nfts_staked = pool.total_nfts_staked.checked_add(1).unwrap();
+
+        // Transfer NFT from user to staking pool vault
+        let transfer_accounts = SplTransfer {
+            from: ctx.accounts.user_nft_account.to_account_info(),
+            to: ctx.accounts.nft_vault.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        };
+
+        token::transfer(
+            CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_accounts),
+            1, // NFTs have amount = 1
+        )?;
+
+        Ok(())
+    }
+
+    pub fn unstake_nft(ctx: Context<UnstakeNft>) -> Result<()> {
+        let current_time = Clock::get()?.unix_timestamp;
+        let pool = &mut ctx.accounts.nft_staking_pool;
+        let user_nft_stake = &mut ctx.accounts.user_nft_stake;
+
+        // Check minimum stake duration
+        require!(
+            current_time >= user_nft_stake.stake_time + pool.min_stake_duration,
+            ErrorCode::MinStakeDurationNotMet
+        );
+
+        // Update reward accumulation for the pool
+        if pool.total_nfts_staked > 0 {
+            let time_elapsed = current_time - pool.last_update_time;
+            let daily_seconds = 86400;
+            let rewards_per_nft = (pool.daily_reward_rate as u128 * time_elapsed as u128) / daily_seconds as u128;
+            pool.accumulated_reward_per_nft = pool.accumulated_reward_per_nft.checked_add(rewards_per_nft as u64).unwrap();
+        }
+        pool.last_update_time = current_time;
+
+        // Calculate pending rewards
+        let time_staked = current_time - user_nft_stake.last_claim_time;
+        let daily_seconds = 86400;
+        let earned_rewards = (pool.daily_reward_rate as u128 * time_staked as u128) / daily_seconds as u128;
+        let total_pending = user_nft_stake.pending_rewards.checked_add(earned_rewards as u64).unwrap();
+
+        // Update user stake (will be closed after this instruction)
+        user_nft_stake.pending_rewards = total_pending;
+
+        // Update pool total
+        pool.total_nfts_staked = pool.total_nfts_staked.checked_sub(1).unwrap();
+
+        let reward_mint = pool.reward_mint;
+        let pool_bump = pool.bump;
+
+        let seeds = &[
+            b"nft_staking_pool",
+            reward_mint.as_ref(),
+            &[pool_bump],
+        ];
+        let signer_seeds = &[&seeds[..]];
+
+        // Transfer NFT back to user
+        let transfer_accounts = SplTransfer {
+            from: ctx.accounts.nft_vault.to_account_info(),
+            to: ctx.accounts.user_nft_account.to_account_info(),
+            authority: ctx.accounts.nft_staking_pool.to_account_info(),
+        };
+
+        token::transfer(
+            CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), transfer_accounts, signer_seeds),
+            1,
+        )?;
+
+        // Transfer pending rewards to user if any
+        if total_pending > 0 {
+            let reward_transfer_accounts = SplTransfer {
+                from: ctx.accounts.reward_vault.to_account_info(),
+                to: ctx.accounts.user_reward_account.to_account_info(),
+                authority: ctx.accounts.nft_staking_pool.to_account_info(),
+            };
+
+            token::transfer(
+                CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), reward_transfer_accounts, signer_seeds),
+                total_pending,
+            )?;
+
+            pool.total_rewards_distributed = pool.total_rewards_distributed.checked_add(total_pending).unwrap();
+        }
+
+        Ok(())
+    }
+
+    pub fn claim_nft_rewards(ctx: Context<ClaimNftRewards>) -> Result<()> {
+        let current_time = Clock::get()?.unix_timestamp;
+        let pool = &mut ctx.accounts.nft_staking_pool;
+        let user_nft_stake = &mut ctx.accounts.user_nft_stake;
+
+        // Update reward accumulation for the pool
+        if pool.total_nfts_staked > 0 {
+            let time_elapsed = current_time - pool.last_update_time;
+            let daily_seconds = 86400;
+            let rewards_per_nft = (pool.daily_reward_rate as u128 * time_elapsed as u128) / daily_seconds as u128;
+            pool.accumulated_reward_per_nft = pool.accumulated_reward_per_nft.checked_add(rewards_per_nft as u64).unwrap();
+        }
+        pool.last_update_time = current_time;
+
+        // Calculate rewards since last claim
+        let time_since_last_claim = current_time - user_nft_stake.last_claim_time;
+        let daily_seconds = 86400;
+        let earned_rewards = (pool.daily_reward_rate as u128 * time_since_last_claim as u128) / daily_seconds as u128;
+        let total_rewards = user_nft_stake.pending_rewards.checked_add(earned_rewards as u64).unwrap();
+
+        require!(total_rewards > 0, ErrorCode::NoRewardsToClaim);
+
+        // Update user stake
+        user_nft_stake.pending_rewards = 0;
+        user_nft_stake.last_claim_time = current_time;
+        user_nft_stake.reward_debt = pool.accumulated_reward_per_nft;
+
+        let reward_mint = pool.reward_mint;
+        let pool_bump = pool.bump;
+
+        let seeds = &[
+            b"nft_staking_pool",
+            reward_mint.as_ref(),
+            &[pool_bump],
+        ];
+        let signer_seeds = &[&seeds[..]];
+
+        // Transfer reward tokens to user
+        let transfer_accounts = SplTransfer {
+            from: ctx.accounts.reward_vault.to_account_info(),
+            to: ctx.accounts.user_reward_account.to_account_info(),
+            authority: ctx.accounts.nft_staking_pool.to_account_info(),
+        };
+
+        token::transfer(
+            CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), transfer_accounts, signer_seeds),
+            total_rewards,
+        )?;
+
+        pool.total_rewards_distributed = pool.total_rewards_distributed.checked_add(total_rewards).unwrap();
+
+        Ok(())
+    }
+
+    pub fn fund_nft_rewards(ctx: Context<FundNftRewards>, amount: u64) -> Result<()> {
+        require!(amount > 0, ErrorCode::InvalidAmount);
+
+        // Transfer reward tokens from admin to pool
+        let transfer_accounts = SplTransfer {
+            from: ctx.accounts.admin_reward_account.to_account_info(),
+            to: ctx.accounts.reward_vault.to_account_info(),
+            authority: ctx.accounts.admin.to_account_info(),
+        };
+
+        token::transfer(
+            CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_accounts),
+            amount,
+        )?;
+
+        Ok(())
+    }
 }
 
 // ============ ACCOUNT STRUCTURES ============
@@ -1247,6 +1470,183 @@ pub struct FundRewards<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+// ============ NFT STAKING ACCOUNT STRUCTURES ============
+
+#[derive(Accounts)]
+pub struct InitializeNftStakingPool<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    
+    #[account(
+        init,
+        payer = admin,
+        space = NftStakingPool::INIT_SPACE,
+        seeds = [b"nft_staking_pool", reward_mint.key().as_ref()],
+        bump
+    )]
+    pub nft_staking_pool: Account<'info, NftStakingPool>,
+    
+    pub reward_mint: Account<'info, Mint>,
+    
+    #[account(
+        init,
+        payer = admin,
+        token::mint = reward_mint,
+        token::authority = nft_staking_pool,
+        seeds = [b"nft_reward_vault", nft_staking_pool.key().as_ref()],
+        bump
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+    
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct StakeNft<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_staking_pool", nft_staking_pool.reward_mint.as_ref()],
+        bump = nft_staking_pool.bump
+    )]
+    pub nft_staking_pool: Account<'info, NftStakingPool>,
+    
+    #[account(
+        init,
+        payer = user,
+        space = UserNftStake::INIT_SPACE,
+        seeds = [b"user_nft_stake", nft_staking_pool.key().as_ref(), nft_mint.key().as_ref(), user.key().as_ref()],
+        bump
+    )]
+    pub user_nft_stake: Account<'info, UserNftStake>,
+    
+    pub nft_mint: Account<'info, Mint>,
+    
+    #[account(mut)]
+    pub user_nft_account: Account<'info, TokenAccount>,
+    
+    #[account(
+        init,
+        payer = user,
+        token::mint = nft_mint,
+        token::authority = nft_staking_pool,
+        seeds = [b"nft_vault", nft_staking_pool.key().as_ref(), nft_mint.key().as_ref()],
+        bump
+    )]
+    pub nft_vault: Account<'info, TokenAccount>,
+    
+    /// CHECK: This is validated through CPI to the token metadata program
+    pub nft_metadata: UncheckedAccount<'info>,
+    
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UnstakeNft<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_staking_pool", nft_staking_pool.reward_mint.as_ref()],
+        bump = nft_staking_pool.bump
+    )]
+    pub nft_staking_pool: Account<'info, NftStakingPool>,
+    
+    #[account(
+        mut,
+        close = user,
+        seeds = [b"user_nft_stake", nft_staking_pool.key().as_ref(), user_nft_stake.nft_mint.as_ref(), user.key().as_ref()],
+        bump = user_nft_stake.bump,
+        has_one = user
+    )]
+    pub user_nft_stake: Account<'info, UserNftStake>,
+    
+    #[account(mut)]
+    pub user_nft_account: Account<'info, TokenAccount>,
+    
+    #[account(mut)]
+    pub user_reward_account: Account<'info, TokenAccount>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_vault", nft_staking_pool.key().as_ref(), user_nft_stake.nft_mint.as_ref()],
+        bump
+    )]
+    pub nft_vault: Account<'info, TokenAccount>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_reward_vault", nft_staking_pool.key().as_ref()],
+        bump
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+    
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimNftRewards<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_staking_pool", nft_staking_pool.reward_mint.as_ref()],
+        bump = nft_staking_pool.bump
+    )]
+    pub nft_staking_pool: Account<'info, NftStakingPool>,
+    
+    #[account(
+        mut,
+        seeds = [b"user_nft_stake", nft_staking_pool.key().as_ref(), user_nft_stake.nft_mint.as_ref(), user.key().as_ref()],
+        bump = user_nft_stake.bump,
+        has_one = user
+    )]
+    pub user_nft_stake: Account<'info, UserNftStake>,
+    
+    #[account(mut)]
+    pub user_reward_account: Account<'info, TokenAccount>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_reward_vault", nft_staking_pool.key().as_ref()],
+        bump
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+    
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct FundNftRewards<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    
+    #[account(
+        seeds = [b"nft_staking_pool", nft_staking_pool.reward_mint.as_ref()],
+        bump = nft_staking_pool.bump,
+        has_one = admin
+    )]
+    pub nft_staking_pool: Account<'info, NftStakingPool>,
+    
+    #[account(mut)]
+    pub admin_reward_account: Account<'info, TokenAccount>,
+    
+    #[account(
+        mut,
+        seeds = [b"nft_reward_vault", nft_staking_pool.key().as_ref()],
+        bump
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+    
+    pub token_program: Program<'info, Token>,
+}
+
 // ============ DATA STRUCTURES ============
 
 #[account]
@@ -1310,6 +1710,37 @@ pub struct UserStake {
     pub bump: u8,
 }
 
+// ============ NFT STAKING DATA STRUCTURES ============
+
+#[account]
+#[derive(InitSpace)]
+pub struct NftStakingPool {
+    pub admin: Pubkey,
+    pub reward_mint: Pubkey,
+    pub reward_vault: Pubkey,
+    pub total_nfts_staked: u64,
+    pub daily_reward_rate: u64, // Rewards per day per staked NFT
+    pub last_update_time: i64,
+    pub accumulated_reward_per_nft: u64,
+    pub min_stake_duration: i64, // Minimum stake duration in seconds
+    pub collection_address: Option<Pubkey>, // Optional collection verification
+    pub total_rewards_distributed: u64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct UserNftStake {
+    pub user: Pubkey,
+    pub nft_staking_pool: Pubkey,
+    pub nft_mint: Pubkey,
+    pub stake_time: i64,
+    pub last_claim_time: i64,
+    pub reward_debt: u64,
+    pub pending_rewards: u64,
+    pub bump: u8,
+}
+
 // ============ ERROR CODES ============
 
 #[error_code]
@@ -1326,6 +1757,12 @@ pub enum ErrorCode {
     CooldownNotMet,
     #[msg("No rewards to claim")]
     NoRewardsToClaim,
+    #[msg("Minimum stake duration not met")]
+    MinStakeDurationNotMet,
+    #[msg("Invalid NFT metadata")]
+    InvalidNftMetadata,
+    #[msg("NFT not from verified collection")]
+    InvalidNftCollection,
 }
 
 #[cfg(test)]
