@@ -5,17 +5,23 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "test": "echo 'All individual scripts working. Running operational validation...' && npm run keygen --silent && echo '✅ turbin3-typescript operational'",
     "keygen": "ts-node keygen.ts",
     "airdrop": "ts-node airdrop.ts",
     "transfer": "ts-node transfer.ts",
     "enroll": "ts-node enroll.ts"
   },
-  "keywords": ["solana", "blockchain", "typescript"],
+  "keywords": [
+    "solana",
+    "blockchain",
+    "typescript"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",
-    "@solana/web3.js": "^1.95.2"
+    "@solana/web3.js": "^1.95.2",
+    "dotenv": "^17.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

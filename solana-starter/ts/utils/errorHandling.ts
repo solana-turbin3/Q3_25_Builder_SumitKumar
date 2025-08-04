@@ -252,9 +252,12 @@ export class Validator {
   }
 
   static isValidUrl(value: string): boolean {
+    if (!value) return false;
+    
     try {
-      new URL(value);
-      return true;
+      const url = new URL(value);
+      // Only allow http and https protocols
+      return url.protocol === 'http:' || url.protocol === 'https:';
     } catch {
       return false;
     }

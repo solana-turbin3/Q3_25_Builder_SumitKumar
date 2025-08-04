@@ -214,6 +214,18 @@ function createConfig(): AppConfig {
   }
 
   const rpcUrl = getEnvVar('SOLANA_RPC_URL') || getRpcUrl(network);
+  
+  // Always validate the final RPC URL
+  if (!Validator.isValidUrl(rpcUrl)) {
+    throw new ApplicationError(
+      `Invalid SOLANA_RPC_URL: ${rpcUrl}`,
+      ErrorCategory.CONFIGURATION,
+      'createConfig',
+      false,
+      { rpcUrl }
+    );
+  }
+  
   const commitment = getEnvVar('SOLANA_COMMITMENT', 'confirmed') as Commitment;
   
   if (!Validator.isValidCommitment(commitment)) {

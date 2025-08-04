@@ -1,4 +1,8 @@
+import { config } from 'dotenv';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+
+// Load environment variables
+config();
 
 // Create a Solana devnet connection
 const rpcUrl = process.env.SOLANA_RPC_URL;

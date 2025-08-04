@@ -94,12 +94,26 @@ describe('Configuration Integration Tests', () => {
   describe('Configuration Utilities', () => {
     it('should handle wallet path fallback', () => {
       delete require.cache[require.resolve('../../config/index')];
-      const { getWalletPath } = require('../../config/index');
-
-      // This will throw since no wallet exists, but we're testing the logic
-      expect(() => {
-        getWalletPath();
-      }).to.throw(/No wallet file found/);
+      
+      // Temporarily modify environment to point to non-existent wallet
+      const originalWalletPath = process.env.WALLET_PATH;
+      const originalExamplePath = process.env.EXAMPLE_WALLET_PATH;
+      
+      process.env.WALLET_PATH = './non-existent-wallet.json';
+      process.env.EXAMPLE_WALLET_PATH = './also-non-existent.json';
+      
+      try {
+        const { getWalletPath } = require('../../config/index');
+        
+        expect(() => {
+          getWalletPath();
+        }).to.throw(/No wallet file found/);
+      } finally {
+        // Restore original environment
+        if (originalWalletPath) process.env.WALLET_PATH = originalWalletPath;
+        if (originalExamplePath) process.env.EXAMPLE_WALLET_PATH = originalExamplePath;
+        delete require.cache[require.resolve('../../config/index')];
+      }
     });
 
     it('should check vault configuration status', () => {
@@ -126,13 +140,24 @@ describe('Configuration Integration Tests', () => {
 
   describe('Security Validation', () => {
     it('should validate RPC URLs', () => {
+      const originalRpcUrl = process.env.SOLANA_RPC_URL;
       process.env.SOLANA_RPC_URL = 'invalid-url';
 
       delete require.cache[require.resolve('../../config/index')];
       
-      expect(() => {
-        require('../../config/index');
-      }).to.throw(/Invalid RPC URL/);
+      try {
+        expect(() => {
+          require('../../config/index');
+        }).to.throw(/Invalid SOLANA_RPC_URL/);
+      } finally {
+        // Restore original environment
+        if (originalRpcUrl) {
+          process.env.SOLANA_RPC_URL = originalRpcUrl;
+        } else {
+          delete process.env.SOLANA_RPC_URL;
+        }
+        delete require.cache[require.resolve('../../config/index')];
+      }
     });
 
     it('should validate commitment levels', () => {
