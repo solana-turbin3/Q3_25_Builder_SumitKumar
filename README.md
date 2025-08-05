@@ -1,6 +1,20 @@
 # Solana Turbin3
 
-## 🚀 Quick Start
+## � Cloning the Repository
+
+**Important**: This repository contains Git submodules. To get the complete project including the `poc-implementation` folder, clone with:
+
+```bash
+# Clone with all submodules
+git clone --recurse-submodules https://github.com/V1C70RYG0D/Q3_25_Builder_SumitKumar.git
+
+# Or if you already cloned without submodules
+git submodule update --init --recursive
+```
+
+The `poc-implementation` folder contains the full proof-of-concept implementation from the [Nen repository](https://github.com/V1C70RYG0D/Nen/tree/master/poc-implementation).
+
+## �🚀 Quick Start
 
 ### Automated Setup
 ```bash
@@ -59,6 +73,14 @@ chmod +x setup.sh
 │   ├── tests/              # Comprehensive marketplace tests
 │   ├── client/             # TypeScript SDK
 │   └── README.md           # Detailed marketplace documentation
+├── poc-implementation/     # 📦 Proof-of-concept implementation (Git submodule)
+│   ├── frontend/           # React-based frontend application
+│   ├── backend/            # Node.js backend services
+│   ├── smart-contracts/    # Solana smart contracts
+│   ├── ai/                 # AI integration modules
+│   ├── infrastructure/     # Infrastructure as code
+│   ├── monitoring/         # Monitoring and analytics
+│   └── testing/            # E2E testing framework
 ├── turbin3-rust/           # Anchor program development
 │   ├── programs/           # Rust smart contracts
 │   └── tests/              # Integration test suites
